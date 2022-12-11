@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"geerpc"
+	"geerpc/registry"
 	"geerpc/xclient"
 	"log"
 	"net"
@@ -27,18 +28,35 @@ func (f Foo) Sleep(args Args, reply *int) error {
 	return nil
 }
 
-func startServer2(addr chan string) {
+func startRegistry(wg *sync.WaitGroup) {
+	l, _ := net.Listen("tcp", ":9998")
+	registry.HandleHTTP()
+	wg.Done()
+	_ = http.Serve(l, nil)
+}
+
+func startServer(registerAddr string, wg *sync.WaitGroup) {
 	var foo Foo
 	l, _ := net.Listen("tcp", ":0")
 	server := geerpc.NewServer()
 	_ = server.Register(&foo);
+	registry.Heartbeat(registerAddr, "tcp@"+l.Addr().String(), 0)
+	log.Println("start rpc server on", l.Addr())
+	wg.Done()
+	server.Accept(l)
+}
 
+func startServer1(addr chan string) {
+	var foo Foo
+	l, _ := net.Listen("tcp", ":0")
+	server := geerpc.NewServer()
+	_ = server.Register(&foo);
 	log.Println("start rpc server on", l.Addr())
 	addr <- l.Addr().String()
 	server.Accept(l)
 }
 
-func startServer(addr chan string) {
+func startServer2(addr chan string) {
 	var foo Foo
 	l, err := net.Listen("tcp", ":9999")
 	if err != nil {
@@ -101,8 +119,8 @@ func foo(xc *xclient.XClient, ctx context.Context, typ, serviceMethod string, ar
 	}
 }
 
-func call(addr1, addr2 string) {
-	d := xclient.NewMultiServerDiscovery([]string{"tcp@" + addr1, "tcp@" + addr2})
+func call(registry string) {
+	d := xclient.NewGeeRegistryDiscovery(registry, 0)
 	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
 	defer func() { _ = xc.Close() }()
 	// send request & receive response
@@ -117,8 +135,8 @@ func call(addr1, addr2 string) {
 	wg.Wait()
 }
 
-func broadcast(addr1, addr2 string) {
-	d := xclient.NewMultiServerDiscovery([]string{"tcp@" + addr1, "tcp@" + addr2})
+func broadcast(registry string) {
+	d := xclient.NewGeeRegistryDiscovery(registry, 0)
 	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
 	defer func() { _ = xc.Close() }()
 	// send request & receive response
@@ -140,21 +158,26 @@ func main2() {
 	log.SetFlags(0)
 	ch := make(chan string)
 	go call2(ch)
-	startServer(ch)
+	startServer2(ch)
 }
 
 func main() {
 	log.SetFlags(0)
-	ch1 := make(chan string)
-	ch2 := make(chan string)
+	registryAddr := "http://localhost:9998/_geerpc_/registry"
 
-	go startServer2(ch1)
-	go startServer2(ch2)
-
-	addr1 := <-ch1
-	addr2 := <-ch2
+	//start registry server
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go startRegistry(&wg)
+	wg.Wait()
 
 	time.Sleep(time.Second)
-	call(addr1, addr2)
-	broadcast(addr1, addr2)
+	wg.Add(2)
+	go startServer(registryAddr, &wg)
+	go startServer(registryAddr, &wg)
+	wg.Wait()
+
+	time.Sleep(time.Second)
+	call(registryAddr)
+	broadcast(registryAddr)
 }
